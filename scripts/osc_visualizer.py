@@ -5,10 +5,13 @@ Standalone OSC receiver + live data-flow visualizer for ee_osc_bridge.
 Does NOT require ROS2 — run it on any machine that can receive UDP from the
 robot's network:
 
-  python3 osc_visualizer.py              # listen on 0.0.0.0:9000
+  python3 osc_visualizer.py                        # listen on 0.0.0.0:9000
   python3 osc_visualizer.py --port 9001
-  python3 osc_visualizer.py --port 9000 --ip 0.0.0.0
-  python3 osc_visualizer.py --trail 5   # 5-second 3-D trail
+  python3 osc_visualizer.py --trail 5              # 5-second 3-D trail
+  python3 osc_visualizer.py --record take01.jsonl  # record while visualising
+
+The --record flag writes a timestamped JSONL log that osc_to_midi.py can
+convert to a MIDI file for Ableton Live.
 
 Dependencies (pip install if missing):
   python-osc   matplotlib   numpy
@@ -18,6 +21,7 @@ import argparse
 import collections
 import importlib
 import importlib.util
+import json
 import pathlib
 import sys
 import threading
@@ -86,11 +90,28 @@ _acc_z = collections.deque(maxlen=N)
 _log   = collections.deque(maxlen=25)
 _hz_t  = collections.deque(maxlen=300)
 
+# ── recording ────────────────────────────────────────────────────────────────
+
+_record_fh    = None   # set to open file handle when --record is active
+_record_start = None   # wall-clock time of first message written
+
+
+def _record(now: float, addr: str, *args):
+    """Append one JSONL line to the recording file (called from OSC threads)."""
+    global _record_start
+    fh = _record_fh
+    if fh is None:
+        return
+    if _record_start is None:
+        _record_start = now
+    fh.write(json.dumps({'t': now, 'addr': addr, 'args': list(args)}) + '\n')
+
 
 # ── OSC handlers ─────────────────────────────────────────────────────────────
 
 def _handle_pos(addr, x, y, z):
     now = time.time()
+    _record(now, addr, float(x), float(y), float(z))
     with _lock:
         _pos_t.append(now); _pos_x.append(float(x))
         _pos_y.append(float(y)); _pos_z.append(float(z))
@@ -100,6 +121,7 @@ def _handle_pos(addr, x, y, z):
 
 def _handle_vel_lin(addr, x, y, z):
     now = time.time()
+    _record(now, addr, float(x), float(y), float(z))
     with _lock:
         _vel_t.append(now); _vel_x.append(float(x))
         _vel_y.append(float(y)); _vel_z.append(float(z))
@@ -108,6 +130,7 @@ def _handle_vel_lin(addr, x, y, z):
 
 def _handle_accel_lin(addr, x, y, z):
     now = time.time()
+    _record(now, addr, float(x), float(y), float(z))
     with _lock:
         _acc_t.append(now); _acc_x.append(float(x))
         _acc_y.append(float(y)); _acc_z.append(float(z))
@@ -115,6 +138,8 @@ def _handle_accel_lin(addr, x, y, z):
 
 
 def _handle_generic(addr, *args):
+    now = time.time()
+    _record(now, addr, *[v for v in args if isinstance(v, (int, float))])
     vals = '  '.join(f'{v:+.4f}' for v in args if isinstance(v, (int, float)))
     with _lock:
         _log.append(f'{addr:<33}  {vals}')
@@ -224,12 +249,9 @@ def _animate(_frame):
                           linewidth=0.6 + alpha * 1.4)
         ax_pos.scatter([x[-1]], [y[-1]], [z[-1]],
                        color='red', s=50, depthshade=False, zorder=5)
-        for dim, vals in (('x', x), ('y', y), ('z', z)):
-            lo = min(vals); hi = max(vals)
-            pad = max((hi - lo) * 0.15, 0.01)
-            if dim == 'x': ax_pos.set_xlim(lo - pad, hi + pad)
-            elif dim == 'y': ax_pos.set_ylim(lo - pad, hi + pad)
-            else:            ax_pos.set_zlim(lo - pad, hi + pad)
+        ax_pos.set_xlim(-1.5, 1.5)
+        ax_pos.set_ylim(-1.5, 1.5)
+        ax_pos.set_zlim(0.0, 1.5)
 
     # ── velocity x y z ────────────────────────────────────────────────────
     ax_vel.set_xlim(cut, 0)
@@ -254,7 +276,12 @@ def _animate(_frame):
             ax_acc.set_ylim(*_symmetric_ylim(axw + ayw + azw))
 
     # ── rate + log ────────────────────────────────────────────────────────
-    txt_rate.set_text(f'Rate: {sum(1 for t in hz if now - t < 1.0)} Hz')
+    rate_str = f'Rate: {sum(1 for t in hz if now - t < 1.0)} Hz'
+    if _record_fh is not None:
+        elapsed = now - (_record_start or now)
+        m, s = divmod(int(elapsed), 60)
+        rate_str += f'   ● REC  {m:02d}:{s:02d}'
+    txt_rate.set_text(rate_str)
     txt_log.set_text('\n'.join(log[-18:]))
 
 
@@ -276,22 +303,38 @@ def _start_server(ip: str, port: int):
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    global TRAIL_SECS  # updated from --trail arg
+    global TRAIL_SECS, _record_fh  # updated from CLI args
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--port',  type=int,   default=9000,      help='UDP port (default: 9000)')
-    parser.add_argument('--ip',                default='0.0.0.0', help='Bind address (default: 0.0.0.0)')
-    parser.add_argument('--trail', type=float, default=TRAIL_SECS,
+    parser.add_argument('--port',   type=int,   default=9000,
+                        help='UDP port (default: 9000)')
+    parser.add_argument('--ip',                 default='0.0.0.0',
+                        help='Bind address (default: 0.0.0.0)')
+    parser.add_argument('--trail',  type=float, default=TRAIL_SECS,
                         help=f'3-D trail length in seconds (default: {TRAIL_SECS})')
+    parser.add_argument('--record', metavar='FILE', default=None,
+                        help='Record all incoming OSC to a JSONL file '
+                             '(convert later with osc_to_midi.py)')
     args = parser.parse_args()
     TRAIL_SECS = args.trail
+
+    if args.record:
+        _record_fh = open(args.record, 'w')
+        print(f'● Recording OSC to {args.record}  (close the window to stop)')
 
     threading.Thread(target=_start_server, args=(args.ip, args.port), daemon=True).start()
 
     ani = animation.FuncAnimation(  # noqa: F841
         fig, _animate, interval=80, blit=False, cache_frame_data=False,
     )
-    plt.show()
+    try:
+        plt.show()
+    finally:
+        if _record_fh is not None:
+            _record_fh.flush()
+            _record_fh.close()
+            n_lines = pathlib.Path(args.record).stat().st_size
+            print(f'● Recording saved → {args.record}  ({n_lines} bytes)')
 
 
 if __name__ == '__main__':

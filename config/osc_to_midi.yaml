@@ -1,0 +1,86 @@
+# osc_to_midi.yaml — CC mapping for converting an OSC recording to MIDI.
+#
+# Edit the 'range' values after watching the visualizer during a real take:
+# the range should cover the full motion you expect for this session.
+# Values outside the range are clamped to 0 or 127.
+#
+# Standard GM CC numbers the composer can use in Ableton:
+#   1  Modulation wheel        7  Volume         11 Expression
+#   74 Filter cutoff           71 Resonance      10 Pan
+#   (or use any 0-127 number — they just need to avoid collision)
+
+midi:
+  bpm: 120          # tempo written into the MIDI file
+  ppq: 480          # pulses per quarter note (ticks per beat)
+  channel: 1        # MIDI channel, 1-16
+
+mappings:
+  # ── End-effector position ──────────────────────────────────────────────
+  - addr:  "/rangen/ee/pos"
+    arg:   0          # x  (left / right in gen3_base_link frame)
+    cc:    1
+    label: "pos_x"
+    range: [-0.5, 0.5]
+
+  - addr:  "/rangen/ee/pos"
+    arg:   1          # y  (forward / back)
+    cc:    2
+    label: "pos_y"
+    range: [-0.5, 0.5]
+
+  - addr:  "/rangen/ee/pos"
+    arg:   2          # z  (up / down)
+    cc:    3
+    label: "pos_z"
+    range: [0.1, 1.0]
+
+  # ── Linear velocity components ─────────────────────────────────────────
+  - addr:  "/rangen/ee/vel_lin"
+    arg:   0
+    cc:    4
+    label: "vel_x"
+    range: [-0.4, 0.4]
+
+  - addr:  "/rangen/ee/vel_lin"
+    arg:   1
+    cc:    5
+    label: "vel_y"
+    range: [-0.4, 0.4]
+
+  - addr:  "/rangen/ee/vel_lin"
+    arg:   2
+    cc:    6
+    label: "vel_z"
+    range: [-0.4, 0.4]
+
+  # ── Linear acceleration components ────────────────────────────────────
+  - addr:  "/rangen/ee/accel_lin"
+    arg:   0
+    cc:    7
+    label: "accel_x"
+    range: [-1.5, 1.5]
+
+  - addr:  "/rangen/ee/accel_lin"
+    arg:   1
+    cc:    8
+    label: "accel_y"
+    range: [-1.5, 1.5]
+
+  - addr:  "/rangen/ee/accel_lin"
+    arg:   2
+    cc:    9
+    label: "accel_z"
+    range: [-1.5, 1.5]
+
+  # ── Pre-normalised magnitudes (0–1 already → CC 0-127 directly) ────────
+  - addr:  "/rangen/ee/vel_lin/mag/norm"
+    arg:   0
+    cc:    11
+    label: "vel_mag_norm"
+    range: [0.0, 1.0]
+
+  - addr:  "/rangen/ee/accel_lin/mag/norm"
+    arg:   0
+    cc:    12
+    label: "accel_mag_norm"
+    range: [0.0, 1.0]
