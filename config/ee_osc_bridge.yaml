@@ -1,0 +1,30 @@
+ee_osc_bridge:
+  ros__parameters:
+    # ── OSC target ──────────────────────────────────────────────────────────
+    # Set osc_target_ip to the IP of the machine running the visualizer /
+    # Ableton.  Use 127.0.0.1 when both run on the same machine.
+    osc_target_ip: "127.0.0.1"
+    osc_target_port: 9000
+
+    # ── Send rate ────────────────────────────────────────────────────────────
+    # Must be ≤ the IGPS odometry rate (~60 Hz on the real robot) so the
+    # timer never outruns the pose source.  50 Hz is a safe default.
+    send_rate_hz: 50.0
+
+    # ── EMA smoothing ────────────────────────────────────────────────────────
+    # Applied to both velocity and acceleration.
+    # 1.0 = raw finite differences (very noisy), 0.0 = frozen.
+    # 0.15 gives ~1–2 frame lag at 60 Hz incoming; increase if still noisy.
+    smoothing_alpha: 0.15
+
+    # ── Pose source ──────────────────────────────────────────────────────────
+    # frame_id: map  |  child_frame_id: gen3_robotiq_85_tool_link
+    pose_topic: "/ground_truth/odometry_igps/gen3_robotiq_85_tool_link"
+
+    # ── Normalisation ranges for /mag/norm outputs (SI units) ───────────────
+    # Tune these after watching the raw magnitudes during a typical motion.
+    norm_vel_lin_mag_min: 0.0
+    norm_vel_lin_mag_max: 0.5     # m/s   — slow arm cruise speed
+
+    norm_accel_lin_mag_min: 0.0
+    norm_accel_lin_mag_max: 2.0   # m/s²  — brisk motion / direction change
