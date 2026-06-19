@@ -18,8 +18,12 @@ ee_osc_bridge:
     smoothing_alpha: 0.15
 
     # ── Pose source ──────────────────────────────────────────────────────────
-    # frame_id: map  |  child_frame_id: gen3_robotiq_85_tool_link
-    pose_topic: "/ground_truth/odometry_igps/gen3_robotiq_85_tool_link"
+    # Default: commanded EE pose (PoseStamped, frame gen3_base_link).
+    # Available whenever the UI/teleop stack is running.
+    # Switch to measured pose when IGPS is online:
+    #   pose_topic: "/ground_truth/odometry_igps/gen3_robotiq_85_tool_link"
+    # (requires changing the subscription type in ee_osc_bridge.py — see TODO there)
+    pose_topic: "/ee_pose_ref"
 
     # ── Normalisation ranges for /mag/norm outputs (SI units) ───────────────
     # Tune these after watching the raw magnitudes during a typical motion.

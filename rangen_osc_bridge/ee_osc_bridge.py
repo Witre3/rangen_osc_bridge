@@ -2,17 +2,26 @@
 """
 ee_osc_bridge — ROS2 node that forwards end-effector kinematics as OSC.
 
-Subscribes to the IGPS odometry topic (nav_msgs/Odometry).  Velocity and
-acceleration are NOT published by the upstream node, so they are derived
-here via finite differences and smoothed with an EMA filter.
+Default pose source: /ee_pose_ref (geometry_msgs/PoseStamped, frame gen3_base_link).
+This is the commanded EE pose from the teleop stack and is always available
+when the UI nodes are running.
+
+Preferred source (when IGPS is running): change pose_topic in ee_osc_bridge.yaml to
+  /ground_truth/odometry_igps/gen3_robotiq_85_tool_link
+and change pose_msg_type to "Odometry".  That topic gives measured pose in the
+map frame; the Odometry twist field is empty so kinematics are still derived here.
+TODO: make msg type a runtime param if both sources need to coexist.
+
+Velocity and acceleration are NOT published by any upstream node, so they are
+derived here via finite differences and smoothed with an EMA filter.
 
 OSC address schema (all per-timer-tick bundle):
-  /rangen/ee/pos            x y z          (m, in map frame)
+  /rangen/ee/pos            x y z          (m, in pose source frame)
   /rangen/ee/quat           x y z w
   /rangen/ee/vel_lin        x y z          (m/s, EMA-filtered)
   /rangen/ee/vel_lin/mag    scalar
   /rangen/ee/vel_lin/mag/norm  0–1 per config range
-  /rangen/ee/vel_ang        x y z          (rad/s, world frame)
+  /rangen/ee/vel_ang        x y z          (rad/s, EMA-filtered)
   /rangen/ee/accel_lin      x y z          (m/s², EMA-filtered)
   /rangen/ee/accel_lin/mag  scalar
   /rangen/ee/accel_lin/mag/norm  0–1 per config range
@@ -20,7 +29,7 @@ OSC address schema (all per-timer-tick bundle):
 
 import rclpy
 from rclpy.node import Node
-from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PoseStamped
 import numpy as np
 from pythonosc import udp_client
 from pythonosc.osc_bundle_builder import OscBundleBuilder, IMMEDIATELY
@@ -53,8 +62,7 @@ class EeOscBridge(Node):
         self.declare_parameter('send_rate_hz', 50.0)
         # EMA alpha: 1.0 = raw, 0.0 = frozen.  ~0.1–0.3 gives musical smoothing.
         self.declare_parameter('smoothing_alpha', 0.15)
-        self.declare_parameter('pose_topic',
-                               '/ground_truth/odometry_igps/gen3_robotiq_85_tool_link')
+        self.declare_parameter('pose_topic', '/ee_pose_ref')
         self.declare_parameter('norm_vel_lin_mag_min', 0.0)
         self.declare_parameter('norm_vel_lin_mag_max', 0.5)
         self.declare_parameter('norm_accel_lin_mag_min', 0.0)
@@ -84,17 +92,26 @@ class EeOscBridge(Node):
         self._prev_quat = None
         self._prev_t    = None
 
-        self.create_subscription(Odometry, pose_topic, self._odom_cb, 10)
+        self._odom_count = 0
+        self._send_count = 0
+        self._log_every  = max(1, int(rate * 2.0))  # log every ~2 s
+
+        self.create_subscription(PoseStamped, pose_topic, self._odom_cb, 10)
         self.create_timer(1.0 / rate, self._send_osc)
 
         self.get_logger().info(
-            f'ee_osc_bridge: {pose_topic} → OSC {ip}:{port} @ {rate:.0f} Hz  '
-            f'alpha={self._alpha}'
+            f'ee_osc_bridge started\n'
+            f'  pose topic : {pose_topic}\n'
+            f'  OSC target : {ip}:{port}\n'
+            f'  send rate  : {rate:.0f} Hz\n'
+            f'  EMA alpha  : {self._alpha}\n'
+            f'  vel norm   : [{self._vel_norm_min}, {self._vel_norm_max}] m/s\n'
+            f'  acc norm   : [{self._acc_norm_min}, {self._acc_norm_max}] m/s²'
         )
 
-    def _odom_cb(self, msg: Odometry):
-        p = msg.pose.pose.position
-        o = msg.pose.pose.orientation
+    def _odom_cb(self, msg: PoseStamped):
+        p = msg.pose.position
+        o = msg.pose.orientation
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
 
         pos  = np.array([p.x, p.y, p.z])
@@ -110,6 +127,7 @@ class EeOscBridge(Node):
         self._prev_pos  = pos
         self._prev_quat = quat
         self._prev_t    = t
+        self._odom_count += 1
 
     def _update_kinematics(self, pos: np.ndarray, quat: np.ndarray, dt: float):
         alpha = self._alpha
@@ -170,6 +188,18 @@ class EeOscBridge(Node):
         _add('/rangen/ee/accel_lin/mag/norm', accel_norm)
 
         self._client.send(builder.build())
+
+        self._send_count += 1
+        if self._send_count % self._log_every == 0:
+            self.get_logger().info(
+                f'[#{self._send_count:6d}]  '
+                f'odom_msgs={self._odom_count}  '
+                f'pos=({pos[0]:+.3f}, {pos[1]:+.3f}, {pos[2]:+.3f}) m  '
+                f'|vel|={vel_mag:.3f} m/s  '
+                f'|vel|norm={vel_norm:.2f}  '
+                f'|acc|={accel_mag:.3f} m/s²  '
+                f'|acc|norm={accel_norm:.2f}'
+            )
 
 
 def main(args=None):

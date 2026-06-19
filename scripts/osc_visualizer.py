@@ -8,6 +8,7 @@ robot's network:
   python3 osc_visualizer.py              # listen on 0.0.0.0:9000
   python3 osc_visualizer.py --port 9001
   python3 osc_visualizer.py --port 9000 --ip 0.0.0.0
+  python3 osc_visualizer.py --trail 5   # 5-second 3-D trail
 
 Dependencies (pip install if missing):
   python-osc   matplotlib   numpy
@@ -15,20 +16,38 @@ Dependencies (pip install if missing):
 
 import argparse
 import collections
+import importlib
+import importlib.util
+import pathlib
 import sys
 import threading
 import time
 
 import numpy as np
 
+# ── fix mpl_toolkits namespace conflict between system matplotlib 3.6.x
+#    and pip matplotlib 3.11.x.  The system nspkg.pth pre-loads the system
+#    path; we prepend the pip path so mplot3d is found there first.
+import mpl_toolkits as _mpl_toolkits
+_pip_mpl3 = pathlib.Path(
+    importlib.util.find_spec('matplotlib').origin
+).parent.parent / 'mpl_toolkits'
+if _pip_mpl3.exists():
+    _p = str(_pip_mpl3)
+    if _p in _mpl_toolkits.__path__:
+        _mpl_toolkits.__path__.remove(_p)
+    _mpl_toolkits.__path__.insert(0, _p)
+
 try:
     import matplotlib
     matplotlib.use('TkAgg')
 except Exception:
-    pass  # fall back to whatever backend is available
+    pass
 
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 import matplotlib.animation as animation
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers '3d' projection
 
 try:
     from pythonosc import dispatcher as osc_dispatcher
@@ -37,26 +56,35 @@ except ImportError:
     sys.exit("python-osc not found.  Run: pip install python-osc")
 
 
-# ── shared circular buffers ──────────────────────────────────────────────────
+# ── config ───────────────────────────────────────────────────────────────────
 
 HISTORY_SECS = 10.0
-N = 2000
+TRAIL_SECS   = 8.0
+N_FADE       = 20
+N            = 2000
 
-_lock = threading.Lock()
 
-_pos_t  = collections.deque(maxlen=N)
-_pos_x  = collections.deque(maxlen=N)
-_pos_y  = collections.deque(maxlen=N)
-_pos_z  = collections.deque(maxlen=N)
+# ── shared circular buffers ──────────────────────────────────────────────────
 
-_vel_t  = collections.deque(maxlen=N)
-_vel_m  = collections.deque(maxlen=N)
+_lock  = threading.Lock()
 
-_acc_t  = collections.deque(maxlen=N)
-_acc_m  = collections.deque(maxlen=N)
+_pos_t = collections.deque(maxlen=N)
+_pos_x = collections.deque(maxlen=N)
+_pos_y = collections.deque(maxlen=N)
+_pos_z = collections.deque(maxlen=N)
 
-_log    = collections.deque(maxlen=25)
-_hz_t   = collections.deque(maxlen=300)   # wall-clock times of /pos arrivals
+_vel_t = collections.deque(maxlen=N)
+_vel_x = collections.deque(maxlen=N)
+_vel_y = collections.deque(maxlen=N)
+_vel_z = collections.deque(maxlen=N)
+
+_acc_t = collections.deque(maxlen=N)
+_acc_x = collections.deque(maxlen=N)
+_acc_y = collections.deque(maxlen=N)
+_acc_z = collections.deque(maxlen=N)
+
+_log   = collections.deque(maxlen=25)
+_hz_t  = collections.deque(maxlen=300)
 
 
 # ── OSC handlers ─────────────────────────────────────────────────────────────
@@ -64,150 +92,179 @@ _hz_t   = collections.deque(maxlen=300)   # wall-clock times of /pos arrivals
 def _handle_pos(addr, x, y, z):
     now = time.time()
     with _lock:
-        _pos_t.append(now)
-        _pos_x.append(float(x))
-        _pos_y.append(float(y))
-        _pos_z.append(float(z))
+        _pos_t.append(now); _pos_x.append(float(x))
+        _pos_y.append(float(y)); _pos_z.append(float(z))
         _hz_t.append(now)
         _log.append(f'{addr:<33}  {x:+.3f}  {y:+.3f}  {z:+.3f}')
 
 
-def _handle_vel_mag(addr, mag):
+def _handle_vel_lin(addr, x, y, z):
     now = time.time()
     with _lock:
-        _vel_t.append(now)
-        _vel_m.append(float(mag))
-        _log.append(f'{addr:<33}  {mag:.4f}')
+        _vel_t.append(now); _vel_x.append(float(x))
+        _vel_y.append(float(y)); _vel_z.append(float(z))
+        _log.append(f'{addr:<33}  {x:+.3f}  {y:+.3f}  {z:+.3f}')
 
 
-def _handle_acc_mag(addr, mag):
+def _handle_accel_lin(addr, x, y, z):
     now = time.time()
     with _lock:
-        _acc_t.append(now)
-        _acc_m.append(float(mag))
-        _log.append(f'{addr:<33}  {mag:.4f}')
+        _acc_t.append(now); _acc_x.append(float(x))
+        _acc_y.append(float(y)); _acc_z.append(float(z))
+        _log.append(f'{addr:<33}  {x:+.3f}  {y:+.3f}  {z:+.3f}')
 
 
 def _handle_generic(addr, *args):
-    vals = '  '.join(
-        f'{v:+.4f}' for v in args if isinstance(v, (int, float))
-    )
+    vals = '  '.join(f'{v:+.4f}' for v in args if isinstance(v, (int, float)))
     with _lock:
         _log.append(f'{addr:<33}  {vals}')
 
 
-# ── matplotlib figure ────────────────────────────────────────────────────────
+# ── figure layout ─────────────────────────────────────────────────────────────
+#
+#  ┌──────────────────────┬─────────────────────┐
+#  │                      │  vel_lin  x y z      │
+#  │  3-D position trail  ├─────────────────────┤
+#  │                      │  accel_lin  x y z    │
+#  │                      ├─────────────────────┤
+#  │                      │  OSC log + rate      │
+#  └──────────────────────┴─────────────────────┘
 
-fig, axes = plt.subplots(4, 1, figsize=(13, 9), gridspec_kw={'height_ratios': [2, 1.5, 1.5, 2]})
+fig = plt.figure(figsize=(16, 8))
 fig.suptitle('rangen EE OSC bridge — live monitor', fontsize=12)
 
-ax_pos, ax_vel, ax_acc, ax_log = axes
+gs = gridspec.GridSpec(3, 2, figure=fig,
+                       width_ratios=[1.3, 1],
+                       height_ratios=[1, 1, 1],
+                       hspace=0.50, wspace=0.35)
 
-ax_pos.set_title('Position  (m, map frame)')
-ax_pos.set_ylabel('m')
-ax_pos.set_xlim(-HISTORY_SECS, 0)
-ax_pos.grid(True, alpha=0.3)
+ax_pos = fig.add_subplot(gs[:, 0], projection='3d')
+ax_vel = fig.add_subplot(gs[0, 1])
+ax_acc = fig.add_subplot(gs[1, 1])
+ax_log = fig.add_subplot(gs[2, 1])
 
-ax_vel.set_title('Linear velocity magnitude  (m/s)')
+ax_pos.set_title('EE position trail  (m)', pad=8)
+ax_pos.set_xlabel('x'); ax_pos.set_ylabel('y'); ax_pos.set_zlabel('z')
+
+ax_vel.set_title('Linear velocity  (m/s)')
 ax_vel.set_ylabel('m/s')
 ax_vel.set_xlim(-HISTORY_SECS, 0)
-ax_vel.set_ylim(0, 0.5)
 ax_vel.grid(True, alpha=0.3)
+(ln_vx,) = ax_vel.plot([], [], 'r-', lw=1.3, label='x')
+(ln_vy,) = ax_vel.plot([], [], 'g-', lw=1.3, label='y')
+(ln_vz,) = ax_vel.plot([], [], 'b-', lw=1.3, label='z')
+ax_vel.legend(loc='upper right', fontsize=7)
 
-ax_acc.set_title('Linear acceleration magnitude  (m/s²)')
+ax_acc.set_title('Linear acceleration  (m/s²)')
 ax_acc.set_ylabel('m/s²')
 ax_acc.set_xlim(-HISTORY_SECS, 0)
-ax_acc.set_ylim(0, 2.0)
 ax_acc.grid(True, alpha=0.3)
 ax_acc.set_xlabel('seconds ago')
+(ln_ax,) = ax_acc.plot([], [], 'r-', lw=1.3, label='x')
+(ln_ay,) = ax_acc.plot([], [], 'g-', lw=1.3, label='y')
+(ln_az,) = ax_acc.plot([], [], 'b-', lw=1.3, label='z')
+ax_acc.legend(loc='upper right', fontsize=7)
 
 ax_log.axis('off')
-ax_log.set_title('OSC message log', loc='left', fontsize=9)
-
-(ln_px,) = ax_pos.plot([], [], 'r-',  lw=1.2, label='x')
-(ln_py,) = ax_pos.plot([], [], 'g-',  lw=1.2, label='y')
-(ln_pz,) = ax_pos.plot([], [], 'b-',  lw=1.2, label='z')
-ax_pos.legend(loc='upper right', fontsize=8)
-
-(ln_vel,) = ax_vel.plot([], [], color='#cc66ff', lw=1.4)
-(ln_acc,) = ax_acc.plot([], [], color='#ff8800', lw=1.4)
-
+ax_log.set_title('OSC log', loc='left', fontsize=8, pad=2)
 txt_log  = ax_log.text(0.0, 1.0, '', transform=ax_log.transAxes,
-                       va='top', ha='left', fontsize=7.5, family='monospace',
-                       wrap=True)
-txt_rate = fig.text(0.99, 0.01, 'Rate: -- Hz', ha='right', va='bottom', fontsize=9)
-
-plt.tight_layout(rect=[0, 0.0, 1, 0.97])
+                       va='top', ha='left', fontsize=7, family='monospace')
+txt_rate = fig.text(0.99, 0.005, 'Rate: -- Hz', ha='right', va='bottom', fontsize=9)
 
 
-def _scrolling(t_buf, y_buf, now, cutoff):
-    """Return (t_rel, y) arrays clipped to the scrolling window."""
-    pairs = [(t - now, y) for t, y in zip(t_buf, y_buf) if (t - now) >= cutoff]
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _window(t_buf, *y_bufs, now, cutoff):
+    """Return time-relative and y arrays for the scrolling window."""
+    pairs = [(i, t - now) for i, t in enumerate(t_buf) if (t - now) >= cutoff]
     if not pairs:
-        return [], []
-    tr, yr = zip(*pairs)
-    return list(tr), list(yr)
+        return ([], *([[] for _ in y_bufs]))
+    idxs, tr = zip(*pairs)
+    return (list(tr), *[[b[i] for i in idxs] for b in y_bufs])
 
+
+def _symmetric_ylim(vals, minimum=0.05):
+    lo, hi = min(vals), max(vals)
+    span = max(abs(lo), abs(hi), minimum) * 1.25
+    return -span, span
+
+
+# ── animation ─────────────────────────────────────────────────────────────────
 
 def _animate(_frame):
     with _lock:
-        pt  = list(_pos_t);  px  = list(_pos_x)
-        py  = list(_pos_y);  pz  = list(_pos_z)
-        vt  = list(_vel_t);  vm  = list(_vel_m)
-        at  = list(_acc_t);  am  = list(_acc_m)
-        log = list(_log)
-        hz  = list(_hz_t)
+        pt = list(_pos_t); px = list(_pos_x)
+        py = list(_pos_y); pz = list(_pos_z)
+        vt = list(_vel_t); vx = list(_vel_x)
+        vy = list(_vel_y); vz = list(_vel_z)
+        at = list(_acc_t); axl = list(_acc_x)
+        ayl = list(_acc_y); azl = list(_acc_z)
+        log = list(_log); hz = list(_hz_t)
 
-    now    = time.time()
-    cutoff = -HISTORY_SECS
+    now = time.time()
+    cut = -HISTORY_SECS
 
-    # ── position ──────────────────────────────────────────────────────────
-    if pt:
-        tr, xr = _scrolling(pt, px, now, cutoff)
-        _,  yr = _scrolling(pt, py, now, cutoff)
-        _,  zr = _scrolling(pt, pz, now, cutoff)
-        if tr:
-            ln_px.set_data(tr, xr)
-            ln_py.set_data(tr, yr)
-            ln_pz.set_data(tr, zr)
-            ax_pos.set_xlim(cutoff, 0)
-            yall = xr + yr + zr
-            pad  = max((max(yall) - min(yall)) * 0.15, 0.02)
-            ax_pos.set_ylim(min(yall) - pad, max(yall) + pad)
+    # ── 3-D fading position trail ─────────────────────────────────────────
+    res = _window(pt, px, py, pz, now=now, cutoff=-TRAIL_SECS)
+    tr, xr, yr, zr = res[0], res[1], res[2], res[3]
 
-    # ── velocity ──────────────────────────────────────────────────────────
+    ax_pos.cla()
+    ax_pos.set_title('EE position trail  (m)', pad=8)
+    ax_pos.set_xlabel('x'); ax_pos.set_ylabel('y'); ax_pos.set_zlabel('z')
+
+    if len(xr) > 1:
+        x = np.array(xr); y = np.array(yr); z = np.array(zr)
+        n = len(x)
+        for i in range(N_FADE):
+            si = i * n // N_FADE
+            ei = min((i + 1) * n // N_FADE + 1, n)
+            alpha = (i + 1) / N_FADE
+            ax_pos.plot3D(x[si:ei], y[si:ei], z[si:ei],
+                          color='steelblue', alpha=alpha,
+                          linewidth=0.6 + alpha * 1.4)
+        ax_pos.scatter([x[-1]], [y[-1]], [z[-1]],
+                       color='red', s=50, depthshade=False, zorder=5)
+        for dim, vals in (('x', x), ('y', y), ('z', z)):
+            lo = min(vals); hi = max(vals)
+            pad = max((hi - lo) * 0.15, 0.01)
+            if dim == 'x': ax_pos.set_xlim(lo - pad, hi + pad)
+            elif dim == 'y': ax_pos.set_ylim(lo - pad, hi + pad)
+            else:            ax_pos.set_zlim(lo - pad, hi + pad)
+
+    # ── velocity x y z ────────────────────────────────────────────────────
+    ax_vel.set_xlim(cut, 0)
     if vt:
-        tr, yr = _scrolling(vt, vm, now, cutoff)
-        if tr:
-            ln_vel.set_data(tr, yr)
-            ax_vel.set_xlim(cutoff, 0)
-            ax_vel.set_ylim(0, max(max(yr) * 1.15, 0.05))
+        res = _window(vt, vx, vy, vz, now=now, cutoff=cut)
+        tr_v, vxw, vyw, vzw = res[0], res[1], res[2], res[3]
+        if tr_v:
+            ln_vx.set_data(tr_v, vxw)
+            ln_vy.set_data(tr_v, vyw)
+            ln_vz.set_data(tr_v, vzw)
+            ax_vel.set_ylim(*_symmetric_ylim(vxw + vyw + vzw))
 
-    # ── acceleration ─────────────────────────────────────────────────────
+    # ── acceleration x y z ────────────────────────────────────────────────
+    ax_acc.set_xlim(cut, 0)
     if at:
-        tr, yr = _scrolling(at, am, now, cutoff)
-        if tr:
-            ln_acc.set_data(tr, yr)
-            ax_acc.set_xlim(cutoff, 0)
-            ax_acc.set_ylim(0, max(max(yr) * 1.15, 0.1))
+        res = _window(at, axl, ayl, azl, now=now, cutoff=cut)
+        tr_a, axw, ayw, azw = res[0], res[1], res[2], res[3]
+        if tr_a:
+            ln_ax.set_data(tr_a, axw)
+            ln_ay.set_data(tr_a, ayw)
+            ln_az.set_data(tr_a, azw)
+            ax_acc.set_ylim(*_symmetric_ylim(axw + ayw + azw))
 
-    # ── rate ──────────────────────────────────────────────────────────────
-    recent = [t for t in hz if now - t < 1.0]
-    txt_rate.set_text(f'Rate: {len(recent)} Hz')
-
-    # ── log ───────────────────────────────────────────────────────────────
-    txt_log.set_text('\n'.join(log[-20:]))
-
-    return ln_px, ln_py, ln_pz, ln_vel, ln_acc, txt_rate, txt_log
+    # ── rate + log ────────────────────────────────────────────────────────
+    txt_rate.set_text(f'Rate: {sum(1 for t in hz if now - t < 1.0)} Hz')
+    txt_log.set_text('\n'.join(log[-18:]))
 
 
-# ── OSC server (background thread) ──────────────────────────────────────────
+# ── OSC server ────────────────────────────────────────────────────────────────
 
 def _start_server(ip: str, port: int):
     d = osc_dispatcher.Dispatcher()
-    d.map('/rangen/ee/pos',           _handle_pos)
-    d.map('/rangen/ee/vel_lin/mag',   _handle_vel_mag)
-    d.map('/rangen/ee/accel_lin/mag', _handle_acc_mag)
+    d.map('/rangen/ee/pos',       _handle_pos)
+    d.map('/rangen/ee/vel_lin',   _handle_vel_lin)
+    d.map('/rangen/ee/accel_lin', _handle_accel_lin)
     d.set_default_handler(_handle_generic)
 
     server = ThreadingOSCUDPServer((ip, port), d)
@@ -216,19 +273,22 @@ def _start_server(ip: str, port: int):
     server.serve_forever()
 
 
-# ── entry point ──────────────────────────────────────────────────────────────
+# ── entry point ───────────────────────────────────────────────────────────────
 
 def main():
+    global TRAIL_SECS  # updated from --trail arg
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--port', type=int, default=9000, help='UDP port to listen on (default: 9000)')
-    parser.add_argument('--ip',   default='0.0.0.0',     help='IP to bind on (default: 0.0.0.0)')
+    parser.add_argument('--port',  type=int,   default=9000,      help='UDP port (default: 9000)')
+    parser.add_argument('--ip',                default='0.0.0.0', help='Bind address (default: 0.0.0.0)')
+    parser.add_argument('--trail', type=float, default=TRAIL_SECS,
+                        help=f'3-D trail length in seconds (default: {TRAIL_SECS})')
     args = parser.parse_args()
+    TRAIL_SECS = args.trail
 
-    t = threading.Thread(target=_start_server, args=(args.ip, args.port), daemon=True)
-    t.start()
+    threading.Thread(target=_start_server, args=(args.ip, args.port), daemon=True).start()
 
-    ani = animation.FuncAnimation(   # noqa: F841  (kept alive by reference)
+    ani = animation.FuncAnimation(  # noqa: F841
         fig, _animate, interval=80, blit=False, cache_frame_data=False,
     )
     plt.show()
