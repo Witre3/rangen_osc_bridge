@@ -1,0 +1,27 @@
+# norm_curves.yaml — tunable 0-1 normalization curves for OSC magnitude
+# channels, edited live with scripts/curve_editor.py (drag points, bend
+# segments, press 's' to save).  ee_osc_bridge hot-reloads this file
+# (polls mtime), so edits here take effect without restarting the node.
+#
+# Each curve maps a raw SI-unit input in [input_min, input_max] through a
+# piecewise curve to an output in [0, 1].  Points are {x, y, bend}, x and y
+# in [0, 1], bend in [-1, 1] (0 = linear, + = ease-in, - = ease-out) and
+# describes the segment running from that point to the next one.
+#
+# Defaults below reproduce the old hardcoded linear min/max behaviour —
+# tune with the GUI once you've watched real motion.
+
+curves:
+  vel_lin_mag:
+    input_min: 0.0
+    input_max: 0.5     # m/s — slow arm cruise speed
+    points:
+      - {x: 0.0, y: 0.0, bend: 0.0}
+      - {x: 1.0, y: 1.0, bend: 0.0}
+
+  accel_lin_mag:
+    input_min: 0.0
+    input_max: 2.0     # m/s² — brisk motion / direction change
+    points:
+      - {x: 0.0, y: 0.0, bend: 0.0}
+      - {x: 1.0, y: 1.0, bend: 0.0}

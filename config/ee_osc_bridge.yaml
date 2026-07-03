@@ -1,10 +1,13 @@
 ee_osc_bridge:
   ros__parameters:
-    # ── OSC target ──────────────────────────────────────────────────────────
-    # Set osc_target_ip to the IP of the machine running the visualizer /
-    # Ableton.  Use 127.0.0.1 when both run on the same machine.
-    osc_target_ip: "127.0.0.1"
-    osc_target_port: 9000
+    # ── OSC targets ─────────────────────────────────────────────────────────
+    # Primary: composer's laptop (Max/MSP or TouchDesigner).
+    osc_target_ip: "192.168.50.129"
+    osc_target_port: 9001
+    # Secondary: this machine's own osc_visualizer.py, so both sides can
+    # watch the same stream. Leave osc_target_ip_2 empty ("") to disable.
+    osc_target_ip_2: "127.0.0.1"
+    osc_target_port_2: 9004
 
     # ── Send rate ────────────────────────────────────────────────────────────
     # Must be ≤ the IGPS odometry rate (~60 Hz on the real robot) so the
@@ -17,18 +20,20 @@ ee_osc_bridge:
     # 0.15 gives ~1–2 frame lag at 60 Hz incoming; increase if still noisy.
     smoothing_alpha: 0.15
 
-    # ── Pose source ──────────────────────────────────────────────────────────
-    # Default: commanded EE pose (PoseStamped, frame gen3_base_link).
-    # Available whenever the UI/teleop stack is running.
-    # Switch to measured pose when IGPS is online:
-    #   pose_topic: "/ground_truth/odometry_igps/gen3_robotiq_85_tool_link"
-    # (requires changing the subscription type in ee_osc_bridge.py — see TODO there)
+    # ── Pose sources ─────────────────────────────────────────────────────────
+    # Commanded EE pose (PoseStamped) — always available when teleop is running.
     pose_topic: "/ee_pose_ref"
+    # Actual (measured) EE pose (PoseStamped, frame gen3_base_link).
+    # Published by haply_delta_ee_pose: TF FK at 100 Hz, with IGPS odometry
+    # as primary source when available.
+    actual_pose_topic: "/ee_pose_actual"
 
-    # ── Normalisation ranges for /mag/norm outputs (SI units) ───────────────
-    # Tune these after watching the raw magnitudes during a typical motion.
-    norm_vel_lin_mag_min: 0.0
-    norm_vel_lin_mag_max: 0.5     # m/s   — slow arm cruise speed
-
-    norm_accel_lin_mag_min: 0.0
-    norm_accel_lin_mag_max: 2.0   # m/s²  — brisk motion / direction change
+    # ── Normalisation curves for /mag/norm outputs ───────────────────────────
+    # Defaults to config/norm_curves.yaml in this package's share directory
+    # (which, under --symlink-install, is a live symlink back to the source
+    # file — so editing it in place, e.g. with scripts/curve_editor.py, is
+    # enough). Override norm_curves_yaml here only if you want a different
+    # curve file. This node polls the file's mtime and hot-reloads it, so no
+    # restart is needed after saving new curves.
+    # norm_curves_yaml: "/path/to/custom_norm_curves.yaml"
+    norm_curves_reload_period_sec: 1.0
