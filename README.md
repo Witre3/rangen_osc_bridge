@@ -12,6 +12,7 @@ fits into the wider Rangen × HoMeR project.
 | `rangen_osc_bridge/ee_osc_bridge.py` | ROS2 node — subscribes to EE pose, derives velocity/acceleration, sends OSC |
 | `rangen_osc_bridge/norm_curve.py` | Shared breakpoint-curve normalization (0-1), used by both the bridge and the curve editor |
 | `scripts/osc_visualizer.py` | Standalone (no ROS2) live monitor — 3-D trail + vel/accel plots + OSC log |
+| `scripts/osc_record.py` | Standalone (no ROS2), headless — records OSC to JSONL/CSV/txt, no GUI; used by `~/demonstrations/scripts/record_demo.sh` to capture OSC alongside a rosbag |
 | `scripts/curve_editor.py` | Standalone (no ROS2) GUI — drag/bend curve breakpoints for the `/mag/norm` outputs against live OSC data |
 | `scripts/osc_to_midi.py` | Converts a recorded OSC session (JSONL) to a MIDI file for Ableton |
 | `config/ee_osc_bridge.yaml` | OSC target IP/port, send rate, smoothing, pose topic, norm curve file path |
@@ -128,6 +129,40 @@ python3 scripts/curve_editor.py -c my_norm_curves.yaml      # tune a different c
 Note: only one process can receive the bridge's OSC stream at a time
 (unicast UDP, not multicast) — you can't watch the visualizer and tune the
 curve editor simultaneously without pointing the bridge back and forth.
+
+## Record OSC headlessly (no GUI)
+
+`scripts/osc_record.py` is a stripped-down version of the visualizer with
+no matplotlib/Tk — it just opens the UDP socket and writes the same three
+formats the visualizer's REC button does, so it's safe to launch as a
+background subprocess (no display required, e.g. over SSH). It listens on
+the same secondary OSC target the visualizer uses by default
+(`127.0.0.1:9004`, see `osc_target_ip_2`/`osc_target_port_2` in
+`ee_osc_bridge.yaml`), so it competes with the visualizer for that port —
+don't run both at once against the same target.
+
+```bash
+python3 /home/wt/rangen_ws/src/rangen_osc_bridge/scripts/osc_record.py --out /path/to/session_dir/session
+```
+
+Writes `session.jsonl` (full args, for `osc_to_midi.py`/`osc_replay.py`),
+`session.csv` (Excel/pandas), and `session.txt` (Max text object + zl
+slice) next to the given stem, creating the parent directory if needed.
+The CSV/txt formats share the visualizer's fixed 3-arg-column schema, so
+messages with more than 3 args (e.g. `/rangen/ee/quat`) are truncated
+there — the JSONL always has the full list.
+
+Useful flags:
+
+```bash
+python3 scripts/osc_record.py --out /path/to/session_dir/session --port 9998  # match a non-default port
+```
+
+Stop with Ctrl+C (SIGINT) or SIGTERM — files are flushed and closed on
+shutdown. This is what
+`/home/wt/demonstrations/scripts/record_demo.sh` launches and stops
+automatically to capture OSC alongside each rosbag, writing into a
+`<bag_name>_osc/` folder next to the bag.
 
 ## Convert a recording to MIDI (for Ableton)
 
