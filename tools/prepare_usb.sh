@@ -54,10 +54,23 @@ say "partitioning + formatting exFAT"
 wipefs -a "$DEV" >/dev/null
 parted -s "$DEV" mklabel gpt
 parted -s -a optimal "$DEV" mkpart "$LABEL" 1MiB 100%
+# macOS will not open the partition unless its GPT *type GUID* is Microsoft
+# basic data (EBD0A0A2-B9E5-4433-87C0-68B6B72699C7).  `parted mkpart` with no
+# fs-type argument leaves it as Linux filesystem data (0FC63DAF-...), and the
+# Mac then reports "The disk you inserted was not readable by this computer"
+# even though the exFAT inside is perfectly valid.  This flag sets that GUID.
+parted -s "$DEV" set 1 msftdata on
 partprobe "$DEV"; sleep 2
 PART="${DEV}1"; [ -b "$PART" ] || PART="${DEV}p1"
 [ -b "$PART" ] || die "partition did not appear"
 mkfs.exfat -n "$LABEL" "$PART" >/dev/null
+
+# Fail loudly here rather than in front of the collaborator.
+PTYPE="$(lsblk -no PARTTYPE "$PART" 2>/dev/null || true)"
+case "$PTYPE" in
+  ebd0a0a2-b9e5-4433-87c0-68b6b72699c7|EBD0A0A2-B9E5-4433-87C0-68B6B72699C7) ;;
+  *) die "partition type is '$PTYPE', not Microsoft basic data — macOS will not read this" ;;
+esac
 
 say "mounting"
 MNT="$(mktemp -d)"
