@@ -59,24 +59,11 @@ import rclpy
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
-import numpy as np
-from pythonosc import udp_client
 
+from .ee_kinematics import EeState, OscSender, emit_builtin, pose_from_msg
 from .generic_sources import GenericSourceManager
 from .norm_curve import NormCurve, load_curves
 from .osc_signals import BUILTIN_ADDRESSES, BUILTIN_SIGNALS, SignalConfig, load_signal_config
-
-
-def _quat_mult(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Quaternion multiplication [x, y, z, w] × [x, y, z, w]."""
-    ax, ay, az, aw = a
-    bx, by, bz, bw = b
-    return np.array([
-        aw * bx + ax * bw + ay * bz - az * by,
-        aw * by - ax * bz + ay * bw + az * bx,
-        aw * bz + ax * by - ay * bx + az * bw,
-        aw * bw - ax * bx - ay * by - az * bz,
-    ])
 
 
 def _default_config_path(filename: str) -> str:
@@ -153,44 +140,24 @@ class EeOscBridge(Node):
         self._reload_signals(force=True)
         self._last_signals_check = self.get_clock().now()
 
-        self._targets = [(ip, port)]
+        targets = [(ip, port)]
         if ip_2:
-            self._targets.append((ip_2, port_2))
-        self._osc_clients = [udp_client.SimpleUDPClient(t_ip, t_port) for t_ip, t_port in self._targets]
+            targets.append((ip_2, port_2))
+        self._sender = OscSender(targets, warn=self.get_logger().warn)
 
-        # Commanded EE kinematics state (source: pose_topic / PoseStamped)
-        self._pos  = np.zeros(3)
-        self._quat = np.array([0.0, 0.0, 0.0, 1.0])
-        self._vel_lin  = np.zeros(3)
-        self._vel_ang  = np.zeros(3)
-        self._accel_lin = np.zeros(3)
+        # Derived kinematics, one state per pose stream.  The arithmetic lives
+        # in ee_kinematics.py so mcap_osc_player.py produces identical numbers.
+        self._ref = EeState(self._alpha)    # commanded, source: pose_topic
+        self._act = EeState(self._alpha)    # actual,    source: actual_pose_topic
 
-        self._prev_pos  = None
-        self._prev_quat = None
-        self._prev_t    = None
-
-        # Actual (measured) EE kinematics state (source: actual_pose_topic / Odometry)
-        self._act_pos       = np.zeros(3)
-        self._act_quat      = np.array([0.0, 0.0, 0.0, 1.0])
-        self._act_vel_lin   = np.zeros(3)
-        self._act_vel_ang   = np.zeros(3)
-        self._act_accel_lin = np.zeros(3)
-
-        self._act_prev_pos  = None
-        self._act_prev_quat = None
-        self._act_prev_t    = None
-
-        self._odom_count     = 0
-        self._act_odom_count = 0
-        self._send_count  = 0
-        self._send_errors = 0
-        self._log_every   = max(1, int(rate * 2.0))  # log every ~2 s
+        self._send_count = 0
+        self._log_every  = max(1, int(rate * 2.0))  # log every ~2 s
 
         self.create_subscription(PoseStamped, pose_topic, self._odom_cb, 10)
         self.create_subscription(PoseStamped, actual_pose_topic, self._actual_odom_cb, 10)
         self.create_timer(1.0 / rate, self._send_osc)
 
-        targets_str = ', '.join(f'{t_ip}:{t_port}' for t_ip, t_port in self._targets)
+        targets_str = self._sender.describe()
         self.get_logger().info(
             f'ee_osc_bridge started\n'
             f'  cmd pose topic : {pose_topic}\n'
@@ -270,91 +237,10 @@ class EeOscBridge(Node):
         )
 
     def _odom_cb(self, msg: PoseStamped):
-        p = msg.pose.position
-        o = msg.pose.orientation
-        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-
-        pos  = np.array([p.x, p.y, p.z])
-        quat = np.array([o.x, o.y, o.z, o.w])
-
-        if self._prev_t is not None:
-            dt = t - self._prev_t
-            if dt > 1e-6:
-                self._update_kinematics(pos, quat, dt)
-
-        self._pos  = pos
-        self._quat = quat
-        self._prev_pos  = pos
-        self._prev_quat = quat
-        self._prev_t    = t
-        self._odom_count += 1
-
-    def _update_kinematics(self, pos: np.ndarray, quat: np.ndarray, dt: float):
-        alpha = self._alpha
-
-        # Linear velocity: finite difference + EMA
-        raw_vl = (pos - self._prev_pos) / dt
-        new_vl = alpha * raw_vl + (1.0 - alpha) * self._vel_lin
-
-        # Linear acceleration: derivative of smoothed velocity + EMA
-        raw_al = (new_vl - self._vel_lin) / dt
-        self._accel_lin = alpha * raw_al + (1.0 - alpha) * self._accel_lin
-
-        self._vel_lin = new_vl
-
-        # Angular velocity from quaternion finite difference.
-        # q_rel = q_curr ⊗ q_prev_conj  ≈  [ω·dt/2, w≈1] for small rotations.
-        q_prev_conj = np.array([
-            -self._prev_quat[0], -self._prev_quat[1],
-            -self._prev_quat[2],  self._prev_quat[3],
-        ])
-        q_rel = _quat_mult(quat, q_prev_conj)
-        if q_rel[3] < 0:
-            q_rel = -q_rel  # shortest-path convention
-        raw_va = 2.0 * q_rel[:3] / dt
-        self._vel_ang = alpha * raw_va + (1.0 - alpha) * self._vel_ang
+        self._ref.update(*pose_from_msg(msg))
 
     def _actual_odom_cb(self, msg: PoseStamped):
-        p = msg.pose.position
-        o = msg.pose.orientation
-        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-
-        pos  = np.array([p.x, p.y, p.z])
-        quat = np.array([o.x, o.y, o.z, o.w])
-
-        if self._act_prev_t is not None:
-            dt = t - self._act_prev_t
-            if dt > 1e-6:
-                self._update_actual_kinematics(pos, quat, dt)
-
-        self._act_pos       = pos
-        self._act_quat      = quat
-        self._act_prev_pos  = pos
-        self._act_prev_quat = quat
-        self._act_prev_t    = t
-        self._act_odom_count += 1
-
-    def _update_actual_kinematics(self, pos: np.ndarray, quat: np.ndarray, dt: float):
-        assert self._act_prev_pos is not None and self._act_prev_quat is not None
-        alpha = self._alpha
-
-        raw_vl = (pos - self._act_prev_pos) / dt
-        new_vl = alpha * raw_vl + (1.0 - alpha) * self._act_vel_lin
-
-        raw_al = (new_vl - self._act_vel_lin) / dt
-        self._act_accel_lin = alpha * raw_al + (1.0 - alpha) * self._act_accel_lin
-
-        self._act_vel_lin = new_vl
-
-        q_prev_conj = np.array([
-            -self._act_prev_quat[0], -self._act_prev_quat[1],
-            -self._act_prev_quat[2],  self._act_prev_quat[3],
-        ])
-        q_rel = _quat_mult(quat, q_prev_conj)
-        if q_rel[3] < 0:
-            q_rel = -q_rel
-        raw_va = 2.0 * q_rel[:3] / dt
-        self._act_vel_ang = alpha * raw_va + (1.0 - alpha) * self._act_vel_ang
+        self._act.update(*pose_from_msg(msg))
 
     def _send_osc(self):
         now = self.get_clock().now()
@@ -365,88 +251,27 @@ class EeOscBridge(Node):
             self._reload_signals()
             self._last_signals_check = now
 
-        pos = self._pos
-        quat = self._quat
-        vl = self._vel_lin
-        va = self._vel_ang
-        al = self._accel_lin
+        send = self._sender.send
 
-        vel_mag   = float(np.linalg.norm(vl))
-        accel_mag = float(np.linalg.norm(al))
-
-        vel_norm   = self._curve_vel.evaluate(vel_mag)
-        accel_norm = self._curve_acc.evaluate(accel_mag)
-
-        # Sent as flat (non-bundled) OSC messages, not an OscBundleBuilder
-        # envelope -- Max/MSP's plain udpreceive->route chain doesn't parse
-        # the '#bundle' framing without an OSC-route/o.route object, which
-        # was silently discarding every packet on the composer's end.
-        def _send_raw(addr: str, args):
-            for client in self._osc_clients:
-                try:
-                    client.send_message(addr, args)
-                except OSError as e:
-                    # Transient (e.g. WiFi hiccup causing EWOULDBLOCK on
-                    # sendto) -- drop this one packet rather than kill the
-                    # node's timer callback, which would stop the whole
-                    # bridge (including the other, unaffected target).
-                    self._send_errors += 1
-                    if self._send_errors % 100 == 1:
-                        self.get_logger().warn(
-                            f'OSC send failed, dropping packet '
-                            f'(#{self._send_errors} so far): {e}'
-                        )
-
-        # The only gate on the built-in block: whether osc_signals.yaml has this
-        # address switched on.  Everything below stays exactly as it was, so the
-        # addresses, their argument order and their on-the-wire ordering cannot
-        # drift from what the composer's Max patch expects.
-        def _add(addr: str, *vals):
-            if addr not in self._enabled_addrs:
-                return
-            _send_raw(addr, [float(v) for v in vals])
-
-        # Commanded EE
-        _add('/rangen/ee/pos',               pos[0],  pos[1],  pos[2])
-        _add('/rangen/ee/quat',              quat[0], quat[1], quat[2], quat[3])
-        _add('/rangen/ee/vel_lin',           vl[0],   vl[1],   vl[2])
-        _add('/rangen/ee/vel_lin/mag',       vel_mag)
-        _add('/rangen/ee/vel_lin/mag/norm',  vel_norm)
-        _add('/rangen/ee/vel_ang',           va[0],   va[1],   va[2])
-        _add('/rangen/ee/accel_lin',         al[0],   al[1],   al[2])
-        _add('/rangen/ee/accel_lin/mag',     accel_mag)
-        _add('/rangen/ee/accel_lin/mag/norm', accel_norm)
-
-        # Actual (measured) EE
-        avl = self._act_vel_lin
-        ava = self._act_vel_ang
-        aal = self._act_accel_lin
-        act_vel_mag   = float(np.linalg.norm(avl))
-        act_accel_mag = float(np.linalg.norm(aal))
-        act_vel_norm   = self._curve_vel.evaluate(act_vel_mag)
-        act_accel_norm = self._curve_acc.evaluate(act_accel_mag)
-
-        _add('/rangen/ee/act/pos',               self._act_pos[0], self._act_pos[1], self._act_pos[2])
-        _add('/rangen/ee/act/vel_lin',           avl[0],  avl[1],  avl[2])
-        _add('/rangen/ee/act/vel_lin/mag',       act_vel_mag)
-        _add('/rangen/ee/act/vel_lin/mag/norm',  act_vel_norm)
-        _add('/rangen/ee/act/vel_ang',           ava[0],  ava[1],  ava[2])
-        _add('/rangen/ee/act/accel_lin',         aal[0],  aal[1],  aal[2])
-        _add('/rangen/ee/act/accel_lin/mag',     act_accel_mag)
-        _add('/rangen/ee/act/accel_lin/mag/norm', act_accel_norm)
+        _vel_mag, _accel_mag, act_vel_mag, act_accel_mag = emit_builtin(
+            self._ref, self._act, self._enabled_addrs,
+            self._curve_vel, self._curve_acc, send,
+        )
 
         # Generic user-selected signals, from the latest-value cache -- same
         # flat (non-bundled) sending, same UDP clients, same tick.  Sent after
         # the built-ins so the EE block's on-the-wire ordering is untouched.
-        self._generic.emit(lambda addr, vals: _send_raw(addr, [float(v) for v in vals]))
+        self._generic.emit(lambda addr, vals: send(addr, [float(v) for v in vals]))
 
         self._send_count += 1
         if self._send_count % self._log_every == 0:
+            pos = self._ref.pos
+            act_pos = self._act.pos
             self.get_logger().info(
                 f'[#{self._send_count:6d}]  '
-                f'cmd_msgs={self._odom_count}  act_msgs={self._act_odom_count}  '
+                f'cmd_msgs={self._ref.count}  act_msgs={self._act.count}  '
                 f'cmd_pos=({pos[0]:+.3f},{pos[1]:+.3f},{pos[2]:+.3f})  '
-                f'act_pos=({self._act_pos[0]:+.3f},{self._act_pos[1]:+.3f},{self._act_pos[2]:+.3f})  '
+                f'act_pos=({act_pos[0]:+.3f},{act_pos[1]:+.3f},{act_pos[2]:+.3f})  '
                 f'|act_vel|={act_vel_mag:.3f} m/s  '
                 f'|act_acc|={act_accel_mag:.3f} m/s²'
             )

@@ -3,3 +3,6 @@ __pycache__/
 *.egg-info/
 logs/
 !logs/.gitkeep
+
+# macOS bundle build output (220 MB of vendored runtimes)
+dist/

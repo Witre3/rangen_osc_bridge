@@ -13,7 +13,11 @@
   <depend>std_msgs</depend>
 
   <exec_depend>python3-numpy</exec_depend>
-  <exec_depend>python3-pythonosc</exec_depend>
+
+  <!-- python-osc has no rosdep key and no Debian package; it is declared in
+       setup.py install_requires instead.  Install it with pip, e.g.
+       "pip install python-osc" (add the user/break-system-packages flags on
+       Ubuntu 24.04).  The offline tool scripts/osc_to_midi.py also needs mido. -->
 
   <export>
     <build_type>ament_python</build_type>
