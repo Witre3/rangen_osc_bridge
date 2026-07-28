@@ -35,34 +35,55 @@ BANNER = r"""
 """
 
 
+def removable_roots():
+    """Mounted removable volumes, on macOS and on Linux.
+
+    The Mac path is /Volumes/*.  The Linux ones matter because the whole
+    app-on-Desktop / takes-on-stick arrangement is otherwise untestable outside
+    macOS, and an untested path is the one that breaks in front of the user.
+    """
+    pats = ['/Volumes/*']                                   # macOS
+    user = os.environ.get('USER') or os.environ.get('LOGNAME') or '*'
+    pats += ['/media/*', f'/media/{user}/*', f'/run/media/{user}/*']   # Linux
+    return [pathlib.Path(p) for pat in pats for p in glob.glob(pat)]
+
+
 def find_bags():
     """Every take we can see, as (label, path), nearest first."""
     roots = []
     here = pathlib.Path(__file__).resolve().parent.parent
     roots.append(here / 'bags')
-    roots.extend(pathlib.Path(v) / 'bags' for v in glob.glob('/Volumes/*'))
+    roots.extend(v / 'bags' for v in removable_roots())
     roots.append(pathlib.Path.home() / 'Desktop' / 'bags')
 
     found = []
     seen = set()
     for root in roots:
-        if not root.is_dir():
+        # Every probe here is wrapped: these paths are other people's mount
+        # points, and one unreadable volume must not stop the scan and leave
+        # the user staring at a traceback instead of their takes.
+        try:
+            if not root.is_dir():
+                continue
+            entries = sorted(root.iterdir())
+        except OSError:
             continue
         # A take is either a .mcap file or a rosbag2 directory holding one.
-        for entry in sorted(root.iterdir()):
+        for entry in entries:
             if entry.name.startswith('.'):
                 continue
-            path = None
-            if entry.is_file() and entry.suffix == '.mcap':
-                path = entry
-            elif entry.is_dir() and glob.glob(str(entry / '*.mcap')):
-                path = entry
-            if path is None:
+            try:
+                if entry.is_file() and entry.suffix == '.mcap':
+                    path = entry
+                elif entry.is_dir() and glob.glob(str(entry / '*.mcap')):
+                    path = entry
+                else:
+                    continue
+            except OSError:
                 continue
-            key = path.name
-            if key in seen:
+            if path.name in seen:
                 continue
-            seen.add(key)
+            seen.add(path.name)
             found.append((path.name, str(path)))
     return found
 
