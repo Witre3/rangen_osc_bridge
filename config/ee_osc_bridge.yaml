@@ -2,7 +2,7 @@ ee_osc_bridge:
   ros__parameters:
     # ── OSC targets ─────────────────────────────────────────────────────────
     # Primary: composer's laptop (Max/MSP or TouchDesigner).
-    osc_target_ip: "192.168.50.129"
+    osc_target_ip: "192.168.50.208"
     osc_target_port: 9001
     # Secondary: this machine's own osc_visualizer.py, so both sides can
     # watch the same stream. Leave osc_target_ip_2 empty ("") to disable.

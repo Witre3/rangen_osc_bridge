@@ -39,6 +39,18 @@ OSC address schema (all per-timer-tick, flat UDP messages — no #bundle framing
 The /mag/norm outputs go through a tunable breakpoint curve (norm_curve.py)
 loaded from norm_curves.yaml and hot-reloaded, so edits made live in
 scripts/curve_editor.py take effect without restarting this node.
+
+Generic signals
+---------------
+Beyond the 17 EE addresses above, any ROS2 topic/field selected in
+scripts/signal_editor.py is forwarded too, as /rangen/<topic>/<field> with a
+fixed argument count.  Both the EE switches and the generic list live in
+config/osc_signals.yaml, which this node polls by mtime and hot-reloads the
+same way it does norm_curves.yaml — so the GUI applies changes live, with no
+restart and no ROS parameter round-trip.
+
+If osc_signals.yaml is missing, empty or malformed, all 17 EE signals are sent
+and no generic ones: exactly the behaviour from before that file existed.
 """
 
 import os
@@ -50,7 +62,9 @@ from geometry_msgs.msg import PoseStamped
 import numpy as np
 from pythonosc import udp_client
 
+from .generic_sources import GenericSourceManager
 from .norm_curve import NormCurve, load_curves
+from .osc_signals import BUILTIN_ADDRESSES, BUILTIN_SIGNALS, SignalConfig, load_signal_config
 
 
 def _quat_mult(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -65,11 +79,12 @@ def _quat_mult(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     ])
 
 
-def _default_curves_yaml() -> str:
+def _default_config_path(filename: str) -> str:
+    """This package's installed config/<filename>, or '' if not installed."""
     try:
         return os.path.join(
             get_package_share_directory('rangen_osc_bridge'),
-            'config', 'norm_curves.yaml',
+            'config', filename,
         )
     except Exception:
         return ''
@@ -95,11 +110,19 @@ class EeOscBridge(Node):
             'actual_pose_topic',
             '/ground_truth/odometry_igps/gen3_robotiq_85_tool_link',
         )
-        self.declare_parameter('norm_curves_yaml', _default_curves_yaml())
+        self.declare_parameter('norm_curves_yaml', _default_config_path('norm_curves.yaml'))
         # How often to check the curve file's mtime and hot-reload it, so
         # edits made live in curve_editor.py apply without restarting this
         # node.  Cheap (one stat() call) so a short interval is fine.
         self.declare_parameter('norm_curves_reload_period_sec', 1.0)
+        # Signal selection: which of the 17 built-in EE addresses are sent, plus
+        # any generic topic/field the user picked in signal_editor.py.  Same
+        # mtime hot-reload deal as the curves above.
+        self.declare_parameter('osc_signals_yaml', _default_config_path('osc_signals.yaml'))
+        self.declare_parameter('osc_signals_reload_period_sec', 1.0)
+        # Ceiling on generic signals, so a runaway config can't turn this node
+        # into a packet cannon aimed at the composer's laptop.
+        self.declare_parameter('generic_max_signals', 32)
 
         ip     = self.get_parameter('osc_target_ip').value
         port   = self.get_parameter('osc_target_port').value
@@ -117,6 +140,18 @@ class EeOscBridge(Node):
         self._curve_acc = NormCurve.linear(0.0, 2.0)
         self._reload_curves(force=True)
         self._last_reload_check = self.get_clock().now()
+
+        self._signals_path = self.get_parameter('osc_signals_yaml').value
+        self._signals_reload_period = self.get_parameter('osc_signals_reload_period_sec').value
+        self._signals_mtime = None
+        # Start with every built-in enabled, so even if _reload_signals below
+        # somehow fails before it sets this, the node sends all 17 addresses —
+        # the behaviour from before osc_signals.yaml existed.
+        self._enabled_addrs = set(BUILTIN_ADDRESSES)
+        self._generic = GenericSourceManager(
+            self, self.get_parameter('generic_max_signals').value)
+        self._reload_signals(force=True)
+        self._last_signals_check = self.get_clock().now()
 
         self._targets = [(ip, port)]
         if ip_2:
@@ -165,7 +200,12 @@ class EeOscBridge(Node):
             f'  EMA alpha      : {self._alpha}\n'
             f'  norm curves    : {self._curves_path}\n'
             f'                   (edit live with curve_editor.py — reloaded every '
-            f'{self._curves_reload_period:.0f}s)'
+            f'{self._curves_reload_period:.0f}s)\n'
+            f'  signals        : {self._signals_path}\n'
+            f'                   (edit live with signal_editor.py — reloaded every '
+            f'{self._signals_reload_period:.0f}s)\n'
+            f'                   {len(self._enabled_addrs)}/{len(BUILTIN_SIGNALS)} built-in EE, '
+            f'{self._generic.status()}'
         )
 
     def _reload_curves(self, force: bool = False):
@@ -182,6 +222,52 @@ class EeOscBridge(Node):
         if 'accel_lin_mag' in curves:
             self._curve_acc = curves['accel_lin_mag']
         self._curves_mtime = mtime
+
+    def _reload_signals(self, force: bool = False):
+        """(Re)load osc_signals.yaml if its mtime changed, and reconcile the
+        generic subscriptions to match.
+
+        Same mtime-poll pattern as _reload_curves() above, and deliberately
+        total: a missing, empty or malformed file resolves to "all 17 built-ins,
+        no generic signals".  This runs inside the 50 Hz timer callback, where
+        an exception would kill the whole bridge, so it must never raise.
+        """
+        path = self._signals_path
+        if not path or not os.path.exists(path):
+            if self._signals_mtime is not None:     # the file was deleted
+                self.get_logger().info(
+                    'osc_signals.yaml removed — falling back to all built-in EE signals')
+                self._apply_signals(SignalConfig.all_on())
+                self._signals_mtime = None
+            return
+
+        try:
+            mtime = os.stat(path).st_mtime_ns
+        except OSError:
+            return
+        if not force and mtime == self._signals_mtime:
+            return
+        # Record the mtime before parsing, so a file that fails to load isn't
+        # re-parsed (and re-warned about) on every single poll.
+        self._signals_mtime = mtime
+
+        try:
+            cfg = load_signal_config(path)
+        except Exception as exc:
+            self.get_logger().warn(
+                f'osc_signals.yaml unreadable ({exc}) — keeping the previous config')
+            return
+        self._apply_signals(cfg)
+
+    def _apply_signals(self, cfg: SignalConfig):
+        self._enabled_addrs = cfg.enabled_addresses()
+        self._generic.reconcile(cfg.generic)
+        for problem in cfg.problems:
+            self.get_logger().warn(f'osc_signals.yaml: {problem}')
+        self.get_logger().info(
+            f'osc_signals reloaded: {len(self._enabled_addrs)}/{len(BUILTIN_SIGNALS)} '
+            f'built-in EE, {self._generic.status()}'
+        )
 
     def _odom_cb(self, msg: PoseStamped):
         p = msg.pose.position
@@ -275,6 +361,9 @@ class EeOscBridge(Node):
         if (now - self._last_reload_check).nanoseconds * 1e-9 >= self._curves_reload_period:
             self._reload_curves()
             self._last_reload_check = now
+        if (now - self._last_signals_check).nanoseconds * 1e-9 >= self._signals_reload_period:
+            self._reload_signals()
+            self._last_signals_check = now
 
         pos = self._pos
         quat = self._quat
@@ -292,8 +381,7 @@ class EeOscBridge(Node):
         # envelope -- Max/MSP's plain udpreceive->route chain doesn't parse
         # the '#bundle' framing without an OSC-route/o.route object, which
         # was silently discarding every packet on the composer's end.
-        def _add(addr: str, *vals):
-            args = [float(v) for v in vals]
+        def _send_raw(addr: str, args):
             for client in self._osc_clients:
                 try:
                     client.send_message(addr, args)
@@ -308,6 +396,15 @@ class EeOscBridge(Node):
                             f'OSC send failed, dropping packet '
                             f'(#{self._send_errors} so far): {e}'
                         )
+
+        # The only gate on the built-in block: whether osc_signals.yaml has this
+        # address switched on.  Everything below stays exactly as it was, so the
+        # addresses, their argument order and their on-the-wire ordering cannot
+        # drift from what the composer's Max patch expects.
+        def _add(addr: str, *vals):
+            if addr not in self._enabled_addrs:
+                return
+            _send_raw(addr, [float(v) for v in vals])
 
         # Commanded EE
         _add('/rangen/ee/pos',               pos[0],  pos[1],  pos[2])
@@ -338,6 +435,11 @@ class EeOscBridge(Node):
         _add('/rangen/ee/act/accel_lin/mag',     act_accel_mag)
         _add('/rangen/ee/act/accel_lin/mag/norm', act_accel_norm)
 
+        # Generic user-selected signals, from the latest-value cache -- same
+        # flat (non-bundled) sending, same UDP clients, same tick.  Sent after
+        # the built-ins so the EE block's on-the-wire ordering is untouched.
+        self._generic.emit(lambda addr, vals: _send_raw(addr, [float(v) for v in vals]))
+
         self._send_count += 1
         if self._send_count % self._log_every == 0:
             self.get_logger().info(
@@ -349,6 +451,15 @@ class EeOscBridge(Node):
                 f'|act_acc|={act_accel_mag:.3f} m/s²'
             )
 
+    def shutdown_generic(self):
+        """Tear down the generic subscriptions before destroy_node().
+
+        destroy_node() would do it anyway; doing it explicitly keeps the
+        teardown symmetric with GenericSourceManager's own lifecycle and makes
+        the unsubscribe show up in the log.
+        """
+        self._generic.shutdown()
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -358,6 +469,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        node.shutdown_generic()
         node.destroy_node()
         rclpy.shutdown()
 
