@@ -50,4 +50,28 @@ builtin:
 #            message shape.
 #   enabled  false keeps the row here and in the GUI but stops both the OSC
 #            output and the ROS subscription.
-generic: []
+#
+# The three rows below are the state_interpreter node's outputs (see
+# config/state_interpreter.yaml).  Their addresses are set by hand rather than
+# auto-derived, because /rangen/reach/discrete is the address the composer's
+# patch routes on — the derived /rangen/rangen/state/reach_discrete is not.
+# If a row is ever re-saved from a GUI, keep those addresses.
+generic:
+  - topic:   /rangen/state/elbow_state
+    type:    std_msgs/msg/Float32
+    field:   data
+    address: /rangen/elbow_state
+    arity:   1
+    enabled: true
+  - topic:   /rangen/state/reach
+    type:    std_msgs/msg/Float32
+    field:   data
+    address: /rangen/reach
+    arity:   1
+    enabled: true
+  - topic:   /rangen/state/reach_discrete
+    type:    std_msgs/msg/Int32
+    field:   data
+    address: /rangen/reach/discrete
+    arity:   1
+    enabled: true

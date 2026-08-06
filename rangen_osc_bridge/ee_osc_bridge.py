@@ -51,6 +51,12 @@ restart and no ROS parameter round-trip.
 
 If osc_signals.yaml is missing, empty or malformed, all 17 EE signals are sent
 and no generic ones: exactly the behaviour from before that file existed.
+
+Three of those generic rows ship with the package: the state_interpreter node's
+arm-posture signals, forwarded as /rangen/elbow_state, /rangen/reach and
+/rangen/reach/discrete.  They are ordinary generic signals — this node needs no
+special knowledge of them, and deleting their rows (or not running that node)
+costs nothing but those three addresses.
 """
 
 import os
