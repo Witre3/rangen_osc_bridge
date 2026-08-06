@@ -3,11 +3,14 @@
 OSC bridge: publishes Rangen end-effector pose, velocity, and acceleration
 over OSC (UDP) for mapping into music software (Ableton Live, Max/MSP, etc).
 See `CLAUDE.md` here for orientation and `first_time_setup.md` for host setup.
+`rangen_ws/CLAUDE.md`'s "Composer Bridge" section covers how this package fits
+into the wider Rangen × HoMeR project.
 
-(This used to point at a "Composer Bridge" section of `rangen_ws/CLAUDE.md`.
-That file was lost to that repo's ignore-everything `.gitignore` — it was never
-actually tracked. `rangen_ws/CLAUDE.md` exists and is committed again as of
-2026-08-06, but it covers the container tooling and has no such section.)
+(That section briefly went missing: `rangen_ws/CLAUDE.md` was untracked, lost
+to that repo's ignore-everything `.gitignore`, and restored on 2026-08-06 —
+first as container-tooling notes only, then with the ROS-workspace document
+folded back in from the desktop, which is where the Composer Bridge section
+came back.)
 
 ## What's in this package
 
