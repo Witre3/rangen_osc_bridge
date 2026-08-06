@@ -41,9 +41,23 @@ from a GUI, keep those addresses.
 
 ## House rules
 
-- Branch is `main`, remote is `github` (`git@github.com:Witre3/rangen_osc_bridge.git`)
-  — note this repo lives on **GitHub**, unlike the rest of the workspace which
-  is on `git.initrobots.ca`.
+- **This repo has two remotes and both are kept in sync.** Push to both, or the
+  one you skip goes quietly stale — GitLab was 12 commits behind before anyone
+  noticed on 2026-08-06.
+
+  | Remote | URL | Role |
+  |---|---|---|
+  | `github` | `git@github.com:Witre3/rangen_osc_bridge.git` | Tracked upstream of `main` |
+  | `origin` | `git@git.initrobots.ca:rangen/internal/rangen_osc_bridge.git` | Team mirror; `rangen_ws/CLAUDE.md` points here |
+
+  ```bash
+  git push github main && git push origin main
+  ```
+
+  Note `origin` is **not** the tracked upstream here, so a bare `git push`
+  goes to `github` only. `git log --oneline HEAD --not --remotes=origin`
+  tells you what GitLab is missing.
+- Branch is `main`.
 - Some older commits carry a `test <test@localhost>` author. They are already
   published; leave them. Check `git config user.email` before committing.
 - `osc_record.py` is invoked by `~/demonstrations/rosbag_recording_tools/scripts/record_demo.sh`
