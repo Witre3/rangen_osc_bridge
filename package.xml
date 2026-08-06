@@ -11,6 +11,8 @@
   <depend>nav_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>std_msgs</depend>
+  <!-- state_interpreter reads the arm's TF tree (elbow and EE vs the base). -->
+  <depend>tf2_ros</depend>
 
   <exec_depend>python3-numpy</exec_depend>
 

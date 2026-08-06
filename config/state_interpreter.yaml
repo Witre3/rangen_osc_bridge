@@ -1,0 +1,38 @@
+state_interpreter:
+  ros__parameters:
+    # ── TF frames ────────────────────────────────────────────────────────────
+    # The arm base: reach is the straight-line distance from this frame's
+    # origin to the end effector, so it must be the frame the arm is mounted in
+    # (gen3_base_link — the same control_frame rangen_kinova_cpp and
+    # haply_delta_ee_pose use).
+    base_frame: "gen3_base_link"
+    # Elbow.  elbow_state is this frame's z minus the EE's z, both expressed in
+    # base_frame: positive when the elbow rides above the hand.
+    elbow_frame: "gen3_forearm_link"
+    ee_frame: "gen3_robotiq_85_tool_link"
+
+    # ── Rate ─────────────────────────────────────────────────────────────────
+    # Matches ee_osc_bridge's send_rate_hz.  The bridge holds the last value
+    # between updates, so publishing slower only makes the OSC stream
+    # stair-step; publishing faster is wasted work.
+    publish_rate_hz: 50.0
+    # Per-lookup wait for a transform.  A late transform is worth less than the
+    # next one arriving on time, so keep this well under one tick.
+    tf_timeout_sec: 0.05
+
+    # ── Reach thresholds (metres) ────────────────────────────────────────────
+    # /rangen/reach/discrete is 0 below reach_near_m, 2 above reach_far_m, and
+    # 1 in between.
+    reach_near_m: 0.6
+    reach_far_m: 0.95
+    # Widens whichever band the arm is currently in, so a hand parked exactly
+    # on a threshold doesn't chatter 0/1/0/1 at 50 Hz and retrigger something in
+    # Max fifty times a second.  0.0 keeps the thresholds exact; ~0.02 (2 cm)
+    # is a good starting point if the discrete output turns out to flicker.
+    reach_hysteresis_m: 0.0
+
+    # ── Output topics ────────────────────────────────────────────────────────
+    # Publishes <topic_prefix>/elbow_state, /reach and /reach_discrete.  The
+    # generic: rows in config/osc_signals.yaml name these topics — change this
+    # and that file has to change with it.
+    topic_prefix: "/rangen/state"

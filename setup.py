@@ -30,6 +30,7 @@ setup(
     entry_points={
         'console_scripts': [
             'ee_osc_bridge = rangen_osc_bridge.ee_osc_bridge:main',
+            'state_interpreter = rangen_osc_bridge.state_interpreter:main',
             'mcap_osc_player = rangen_osc_bridge.mcap_osc_player:main',
         ],
     },
