@@ -10,12 +10,15 @@ fits into the wider Rangen × HoMeR project.
 | File | Role |
 |---|---|
 | `rangen_osc_bridge/ee_osc_bridge.py` | ROS2 node — subscribes to EE pose, derives velocity/acceleration, sends OSC |
+| `rangen_osc_bridge/state_interpreter.py` | ROS2 node — reads the arm's TF tree and publishes the derived state topics the bridge forwards as `/rangen/elbow_state`, `/rangen/reach`, `/rangen/reach/discrete` |
 | `rangen_osc_bridge/norm_curve.py` | Shared breakpoint-curve normalization (0-1), used by both the bridge and the curve editor |
 | `scripts/osc_visualizer.py` | Standalone (no ROS2) live monitor — 3-D trail + vel/accel plots + OSC log |
 | `scripts/osc_record.py` | Standalone (no ROS2), headless — records OSC to JSONL/CSV/txt, no GUI; used by `~/demonstrations/scripts/record_demo.sh` to capture OSC alongside a rosbag |
 | `scripts/curve_editor.py` | Standalone (no ROS2) GUI — drag/bend curve breakpoints for the `/mag/norm` outputs against live OSC data |
 | `scripts/osc_to_midi.py` | Converts a recorded OSC session (JSONL) to a MIDI file for Ableton |
 | `config/ee_osc_bridge.yaml` | OSC target IP/port, send rate, smoothing, pose topic, norm curve file path |
+| `config/state_interpreter.yaml` | TF frames (base/elbow/EE), publish rate, and the reach thresholds |
+| `config/osc_signals.yaml` | Which built-in EE addresses are sent, plus the generic topic→address rows (this is where `state_interpreter`'s three signals are wired to their OSC addresses) |
 | `config/norm_curves.yaml` | Tunable 0-1 normalization curves for `vel_lin_mag` / `accel_lin_mag`, edited by `curve_editor.py`, hot-reloaded by the bridge |
 | `config/osc_to_midi.yaml` | OSC address → MIDI CC mapping used by `osc_to_midi.py` |
 | `launch/ee_osc_bridge.launch.py` | Launches `ee_osc_bridge` with the yaml config |
@@ -60,6 +63,48 @@ directly (also has the smoothing and norm-curve-file settings). The actual
 normalization curves live in a separate file — see "Tune normalization
 curves" below.
 
+This launch file also starts `state_interpreter` (next section). Leave it out
+— e.g. when there is no TF tree to read — with:
+
+```bash
+ros2 launch rangen_osc_bridge ee_osc_bridge.launch.py state_interpreter:=false
+```
+
+## Arm state signals (state_interpreter)
+
+`state_interpreter` reads the arm's TF tree and reduces it to three scalars,
+published as ordinary ROS topics and forwarded to Max by the bridge:
+
+| ROS topic | OSC address | args | Meaning |
+|---|---|---|---|
+| `/rangen/state/elbow_state` | `/rangen/elbow_state` | 1 | elbow z − EE z (m) — positive when the elbow rides above the hand |
+| `/rangen/state/reach` | `/rangen/reach` | 1 | straight-line distance from the arm base to the EE (m) |
+| `/rangen/state/reach_discrete` | `/rangen/reach/discrete` | 1 | `0` below 0.6 m, `2` above 0.95 m, `1` in between |
+
+Both ends of `elbow_state` come from the same TF snapshot
+(`gen3_base_link` → `gen3_forearm_link` and → `gen3_robotiq_85_tool_link`), so
+the difference can never mix two poses sampled at different instants. `reach`
+is the norm of the EE translation in `gen3_base_link`, i.e. the distance from
+the arm base itself. Nothing is published until TF resolves — a missing
+transform sends silence, not a zero.
+
+The node never opens a UDP socket: the bridge does the sending, so all three
+ride the same 50 Hz tick as the EE block and every OSC address/arity stays in
+one file. The wiring is the three `generic:` rows in
+`config/osc_signals.yaml` — edit an address there, not in the node.
+
+Tunables live in `config/state_interpreter.yaml`: the three frame names, the
+publish rate, `reach_near_m` / `reach_far_m`, and `reach_hysteresis_m` (0 by
+default; set it to ~0.02 if a hand parked on a threshold makes the discrete
+output chatter at the send rate).
+
+Run it on its own — the bridge picks its topics up either way:
+
+```bash
+ros2 run rangen_osc_bridge state_interpreter --ros-args \
+  --params-file /home/wt/rangen_ws/install/rangen_osc_bridge/share/rangen_osc_bridge/config/state_interpreter.yaml
+```
+
 ## Launch the visualizer (no ROS2 required)
 
 Run this on any machine that can receive the UDP OSC stream — the same
@@ -75,7 +120,16 @@ Useful flags:
 python3 scripts/osc_visualizer.py --port 9001           # match a non-default port
 python3 scripts/osc_visualizer.py --trail 5              # shorter 3-D trail (seconds)
 python3 scripts/osc_visualizer.py --record take01.jsonl  # record while visualising
+python3 scripts/osc_visualizer.py --reach-near 0.5 --reach-far 1.0  # retuned thresholds
 ```
+
+Panels, top to bottom on the right: linear velocity, linear acceleration, arm
+state, and the OSC log. The arm-state panel plots `/rangen/reach` and
+`/rangen/elbow_state` on one metre axis, with dashed lines where
+`/rangen/reach/discrete` steps and a badge showing the current level —
+green 0, amber 1, red 2. `--reach-near` / `--reach-far` only move the dashed
+lines; the levels themselves come from `state_interpreter`, so keep the two in
+sync with `config/state_interpreter.yaml` if you retune them.
 
 ## Tune normalization curves (curve_editor.py)
 
